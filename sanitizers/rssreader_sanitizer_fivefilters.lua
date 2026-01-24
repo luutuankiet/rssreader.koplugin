@@ -85,6 +85,7 @@ function FiveFiltersSanitizer.extractHtml(xml_content)
     end
 
     local title_text = util.htmlEntitiesToUtf8(extractTagContent(item_block, "title") or "")
+    local link_text = extractTagContent(item_block, "link") or ""
     local description_text = extractTagContent(item_block, "description") or ""
 
     if description_text == "" then
@@ -100,6 +101,9 @@ function FiveFiltersSanitizer.extractHtml(xml_content)
     end
 
     local fragments = {}
+    if link_text ~= "" then
+        table.insert(fragments, string.format("<p><b>Source:</b> <a href=\"%s\">%s</a></p><hr/>", link_text, link_text))
+    end
     table.insert(fragments, description_text)
 
     return table.concat(fragments, "")
