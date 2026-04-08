@@ -30,6 +30,19 @@ local HtmlResources = require("rssreader_html_resources")
 local FiveFiltersSanitizer = require("sanitizers/rssreader_sanitizer_fivefilters")
 local DiffbotSanitizer = require("sanitizers/rssreader_sanitizer_diffbot")
 
+local Cache = nil
+do local ok, mod = pcall(require, "rssreader_cache") if ok then Cache = mod end end
+
+--- Load performance configuration with safe defaults.
+local function getPerformanceConfig()
+    package.loaded["rssreader_configuration"] = nil
+    local ok, config = pcall(require, "rssreader_configuration")
+    if ok and type(config) == "table" and type(config.performance) == "table" then
+        return config.performance
+    end
+    return {}
+end
+
 local function getStartOfTodayTimestamp()
     local now_t = os.date("*t")
     local start_of_day_t = {
@@ -663,9 +676,13 @@ local function shouldUseFiveFilters(builder)
     return flag and true or false
 end
 
-local function fetchViaHttp(link, on_complete)
+local function fetchViaHttp(link, on_complete, timeout_seconds)
     local sink = {}
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+    if timeout_seconds and timeout_seconds > 0 then
+        socketutil:set_timeout(timeout_seconds, timeout_seconds)
+    else
+        socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+    end
     local ok, status_code, _, status_text = http.request{
         url = link,
         method = "GET",
@@ -705,6 +722,18 @@ local function fetchStoryContent(story, builder, on_complete, options)
             on_complete(nil, "missing_link")
         end
         return
+    end
+
+    -- Check sanitized content cache (instant open for previously-read articles)
+    if Cache then
+        local cache_key = "article:" .. link
+        local cached = Cache.get(cache_key, 86400) -- 24-hour TTL
+        if cached and cached.html then
+            if on_complete then
+                on_complete(cached.html, nil, cached.download_info)
+            end
+            return
+        end
     end
 
     local silent = options and options.silent
@@ -766,6 +795,21 @@ local function fetchStoryContent(story, builder, on_complete, options)
                 download_info.html_for_epub = epub_document or html_for_epub
                 download_info.original_url = link
 
+                -- Cache the sanitized content for instant re-reads
+                if Cache then
+                    local cache_key = "article:" .. link
+                    -- Only cache essential data (not image assets, keep it small)
+                    local cache_data = {
+                        html = raw_html,
+                        download_info = {
+                            sanitized_successful = download_info.sanitized_successful,
+                            images_requested = download_info.images_requested,
+                            original_url = download_info.original_url,
+                        },
+                    }
+                    Cache.set(cache_key, cache_data)
+                end
+
                 if on_complete then
                     on_complete(raw_html, nil, download_info)
                 end
@@ -797,12 +841,14 @@ local function fetchStoryContent(story, builder, on_complete, options)
 
                 local sanitizer_type = sanitizer.type and sanitizer.type:lower() or ""
                 if sanitizer_type == "fivefilters" then
-                    local fivefilters_url = FiveFiltersSanitizer.buildUrl(link)
+                    local fivefilters_url = FiveFiltersSanitizer.buildUrl(link, sanitizer)
                     if not fivefilters_url then
                         processSanitizer(index + 1)
                         return
                     end
 
+                    local perf = getPerformanceConfig()
+                    local san_timeout = perf.sanitizer_timeout
                     fetchViaHttp(fivefilters_url, function(content, err)
                         if not content then
                             processSanitizer(index + 1)
@@ -826,7 +872,7 @@ local function fetchStoryContent(story, builder, on_complete, options)
                         end
 
                         finalizeContent(fivefilters_html, true)
-                    end)
+                    end, san_timeout)
                 elseif sanitizer_type == "diffbot" then
                     local diffbot_url = DiffbotSanitizer.buildUrl(sanitizer, link)
                     if not diffbot_url then
@@ -861,6 +907,34 @@ local function fetchStoryContent(story, builder, on_complete, options)
             processSanitizer(1)
         end)
     end)
+end
+
+--- Schedule background pre-fetch of the first N stories' sanitized content.
+-- Runs silently after the story list menu is rendered so articles open instantly.
+-- @param stories  array of story tables
+-- @param builder  MenuBuilder instance (passed as sanitizer config source)
+-- @param max_prefetch  how many stories to prefetch (default 3)
+local function schedulePrefetch(stories, builder, max_prefetch)
+    if not Cache then return end
+    if not stories or #stories == 0 then return end
+    max_prefetch = max_prefetch or 3
+    local prefetch_delay = 2 -- seconds after menu render
+
+    for i = 1, math.min(max_prefetch, #stories) do
+        local story = stories[i]
+        local slink = story and (story.permalink or story.href or story.link)
+        if slink and not Cache.get("article:" .. slink, 86400) then
+            UIManager:scheduleIn(prefetch_delay + (i - 1) * 3, function()
+                -- Silent fetch -- no UI messages
+                fetchStoryContent(story, builder, function(content, err, info)
+                    -- Content is now cached by the fetchStoryContent cache logic
+                    if content then
+                        logger.dbg("RSSReader prefetch complete:", slink)
+                    end
+                end, { silent = true })
+            end)
+        end
+    end
 end
 
 local function downloadStoryToCache(story, builder, on_complete)
@@ -2074,6 +2148,9 @@ function MenuBuilder:showLocalFeed(feed, opts)
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
         UIManager:setDirty(nil, "full")
+
+        -- Background pre-fetch first few stories for instant article open
+        schedulePrefetch(stories, self)
     end
 
     local has_cached_stories = feed_node._rss_stories and #feed_node._rss_stories > 0
@@ -2594,6 +2671,9 @@ function MenuBuilder:showNewsBlurFeed(account, client, feed_node, opts)
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
         UIManager:setDirty(nil, "full")
+
+        -- Background pre-fetch first few stories for instant article open
+        schedulePrefetch(stories, self)
     end
 
     if fetch_page then
@@ -2889,6 +2969,9 @@ function MenuBuilder:showCommaFeedFeed(account, client, feed_node, opts)
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
         UIManager:setDirty(nil, "full")
+
+        -- Background pre-fetch first few stories for instant article open
+        schedulePrefetch(stories, self)
     end
 
     if fetch_page then
@@ -3232,6 +3315,9 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
         UIManager:setDirty(nil, "full")
+
+        -- Background pre-fetch first few stories for instant article open
+        schedulePrefetch(stories, self)
     end
 
     if fetch_page then

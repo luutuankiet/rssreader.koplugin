@@ -5,6 +5,12 @@ local socketutil = require("socketutil")
 local util = require("util")
 local json = require("json.decode")
 
+local Cache = nil
+do
+    local ok, mod = pcall(require, "rssreader_cache")
+    if ok then Cache = mod end
+end
+
 local FeedFetcher = {}
 
 local USER_AGENT = "KOReader RSSReader"
@@ -292,7 +298,28 @@ local function detectFormat(content)
     return "unknown"
 end
 
+--- Load performance configuration with safe defaults.
+local function getPerformanceConfig()
+    package.loaded["rssreader_configuration"] = nil
+    local ok, config = pcall(require, "rssreader_configuration")
+    if ok and type(config) == "table" and type(config.performance) == "table" then
+        return config.performance
+    end
+    return {}
+end
+
 function FeedFetcher.fetch(url)
+    -- Check cache first
+    if Cache then
+        local perf = getPerformanceConfig()
+        local ttl = perf.stories_cache_ttl or 300
+        local cache_key = "feed:" .. (url or "")
+        local cached = Cache.get(cache_key, ttl)
+        if cached then
+            return true, cached
+        end
+    end
+
     local body, err = httpGet(url)
     if not body then
         return false, err or "Unable to download feed"
@@ -308,6 +335,12 @@ function FeedFetcher.fetch(url)
         items = parseJSON(body)
     else
         return false, "Unsupported feed format"
+    end
+
+    -- Cache the parsed result
+    if Cache and items then
+        local cache_key = "feed:" .. (url or "")
+        Cache.set(cache_key, items)
     end
 
     return true, items

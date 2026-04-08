@@ -8,10 +8,32 @@ local socketutil = require("socketutil")
 local url = require("socket.url")
 local mime = require("mime")
 
+local Cache = nil
+do
+    local ok, mod = pcall(require, "rssreader_cache")
+    if ok then Cache = mod end
+end
+
 local FreshRSS = {}
 FreshRSS.__index = FreshRSS
 
 local USER_AGENT = "KOReader RSSReader"
+
+--- Load performance configuration with safe defaults.
+local function getPerformanceConfig()
+    package.loaded["rssreader_configuration"] = nil
+    local ok, config = pcall(require, "rssreader_configuration")
+    if ok and type(config) == "table" and type(config.performance) == "table" then
+        return config.performance
+    end
+    return {}
+end
+
+--- Build a cache key scoped to this FreshRSS instance's base_url.
+local function makeCacheKey(self, prefix, suffix)
+    local base = (self.account and self.account.auth and self.account.auth.base_url) or "unknown"
+    return prefix .. ":" .. base .. ":" .. (suffix or "")
+end
 
 local function requestWithScheme(options)
     local parsed_url = url.parse(options.url)
@@ -231,6 +253,17 @@ function FreshRSS:fetchStructure(force)
         return true, self.tree_cache
     end
 
+    -- Check disk cache (survives plugin restarts)
+    if not force and Cache then
+        local perf = getPerformanceConfig()
+        local cache_key = makeCacheKey(self, "structure", "tree")
+        local cached = Cache.get(cache_key, perf.structure_cache_ttl or 3600)
+        if cached then
+            self.tree_cache = cached
+            return true, cached
+        end
+    end
+
     -- 1. Get all subscriptions
     local ok, subs_data = self:authorizedRequest("GET", "/api/greader.php/reader/api/0/subscription/list", { output = "json" })
     if not ok then
@@ -244,6 +277,13 @@ function FreshRSS:fetchStructure(force)
     end
 
     self.tree_cache = self:buildTreeFromData(subs_data, tags_data)
+
+    -- Persist to disk cache
+    if Cache then
+        local cache_key = makeCacheKey(self, "structure", "tree")
+        Cache.set(cache_key, self.tree_cache)
+    end
+
     return true, self.tree_cache
 end
 
@@ -363,31 +403,36 @@ function FreshRSS:fetchStories(feed_id, options)
     end
     options = options or {}
     local page = options.page or 1
+    local perf = getPerformanceConfig()
 
+    -- Check disk cache first (unless explicitly forcing refresh)
+    if not options.force_refresh and Cache then
+        local filter_key = options.read_filter or "all"
+        local cache_key = makeCacheKey(self, "stories", feed_id .. ":" .. filter_key .. ":p" .. page)
+        local cached = Cache.get(cache_key, perf.stories_cache_ttl or 300)
+        if cached then
+            return true, cached
+        end
+    end
+
+    local stories_per_page = perf.stories_per_page or 15
     local query = {
         output = "json",
-        n = 15, -- Number of items to fetch unless override by is_special_feed = true
+        n = stories_per_page,
     }
     if options.continuation then
         query.c = options.continuation
     end
 
     if options.published_since then
-        -- 'nt' means "newer than"
-        query.nt = options.published_since 
-    end
- 
-    if options.read_filter == "unread_only" then
-        -- 'xt' means "exclude tag". We exclude items with the "read" state.
-        query.xt = "user/-/state/com.google/read"
-    elseif options.read_filter == "read_only" then
-        -- 'it' means "include tag".
-        query.it = "user/-/state/com.google/read"
+        query.nt = options.published_since
     end
 
-    -- We fetch unread first, then all. FreshRSS doesn't have a simple page number.
-    -- This implementation is simple and just fetches the latest 50.
-    -- A real implementation would need to handle the 'c' (continuation) param.
+    if options.read_filter == "unread_only" then
+        query.xt = "user/-/state/com.google/read"
+    elseif options.read_filter == "read_only" then
+        query.it = "user/-/state/com.google/read"
+    end
 
     local ok, data_or_err = self:authorizedRequest("GET", "/api/greader.php/reader/api/0/stream/contents/" .. url.escape(feed_id), query)
     if not ok then
@@ -399,11 +444,20 @@ function FreshRSS:fetchStories(feed_id, options)
         table.insert(stories, normalizeEntry(entry))
     end
 
-    return true, {
+    local result = {
         stories = stories,
         more_stories = data_or_err.continuation and true or false,
         continuation = data_or_err.continuation,
     }
+
+    -- Cache the result
+    if Cache then
+        local filter_key = options.read_filter or "all"
+        local cache_key = makeCacheKey(self, "stories", feed_id .. ":" .. filter_key .. ":p" .. page)
+        Cache.set(cache_key, result)
+    end
+
+    return true, result
 end
 
 function FreshRSS:markStory(story, add_tag, remove_tag)
@@ -443,15 +497,30 @@ function FreshRSS:markStory(story, add_tag, remove_tag)
 end
 
 function FreshRSS:markStoryAsRead(feed_id, story)
-    return self:markStory(story, "user/-/state/com.google/read", nil)
+    local ok, err = self:markStory(story, "user/-/state/com.google/read", nil)
+    if ok and Cache then
+        local base = (self.account and self.account.auth and self.account.auth.base_url) or "unknown"
+        Cache.invalidatePrefix("stories:" .. base)
+    end
+    return ok, err
 end
 
 function FreshRSS:markStoryAsUnread(feed_id, story)
-    return self:markStory(story, nil, "user/-/state/com.google/read")
+    local ok, err = self:markStory(story, nil, "user/-/state/com.google/read")
+    if ok and Cache then
+        local base = (self.account and self.account.auth and self.account.auth.base_url) or "unknown"
+        Cache.invalidatePrefix("stories:" .. base)
+    end
+    return ok, err
 end
 
 function FreshRSS:markFeedAsRead(feed_id)
-    return self:markStory({ id = feed_id }, "user/-/state/com.google/read", nil)
+    local ok, err = self:markStory({ id = feed_id }, "user/-/state/com.google/read", nil)
+    if ok and Cache then
+        local base = (self.account and self.account.auth and self.account.auth.base_url) or "unknown"
+        Cache.invalidatePrefix("stories:" .. base)
+    end
+    return ok, err
 end
 
 return FreshRSS

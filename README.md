@@ -39,6 +39,46 @@ The `features` block in `rssreader_configuration.lua` controls how the plugin fe
 ## Content Sanitizers
 Sanitizers fetch and normalize full-page article HTML before it is shown in KOReader. When you open a story the plugin iterates over the active sanitizers in the order configured under `sanitizers` in `rssreader_configuration.lua`. Each sanitizer tries to produce cleaned HTML; if it fails (for example, by returning empty content or hitting an error) the plugin automatically falls back to the next sanitizer in the list, and eventually to the original feed content if none succeed.
 
+You can point sanitizers at a self-hosted instance by setting `base_url` in the sanitizer config entry (e.g. `base_url = "https://rss.example.com"` for a self-hosted FiveFilters).
+
+## Performance & Caching
+
+The plugin includes a **multi-layer disk cache** to minimize network requests on resource-constrained devices like the Kindle Paperwhite 3:
+
+| Cache Layer | What | Default TTL | Effect |
+|---|---|---|---|
+| Feed structure | Folder/feed tree from the API | 1 hour | Opening an account is instant after first load |
+| Story lists | Article metadata per feed | 5 minutes | Re-opening a feed doesn't re-fetch |
+| Sanitized articles | Full cleaned HTML from FiveFilters/Diffbot | 24 hours | Articles you've read once open instantly |
+| Local feeds | Parsed RSS/Atom/JSON feed items | 5 minutes | Re-opening local feeds is instant |
+
+**Background pre-fetch:** When you open any feed, the first 3 articles are automatically sanitized in the background (staggered at 2s, 5s, 8s). By the time you finish reading article 1, articles 2-3 are ready for instant display.
+
+All cache parameters are tunable via the `performance` block in `rssreader_configuration.lua`:
+
+```lua
+performance = {
+    stories_per_page = 25,         -- items per API request
+    stories_cache_ttl = 300,       -- story list cache (seconds)
+    structure_cache_ttl = 3600,    -- feed tree cache (seconds)
+    fetch_timeout = 10,            -- per-request timeout
+    sanitizer_timeout = 15,        -- sanitizer request timeout
+},
+```
+
+Cache files are stored in KOReader's settings directory (`settings/rssreader_cache/`). To clear the cache, delete that directory or use the Settings menu.
+
+## Deployment
+
+A deploy script is provided for SSH-based deployment to Kindle devices:
+
+```bash
+./scripts/deploy-rssreader.sh kindle    # deploy to 'kindle' SSH alias
+./scripts/deploy-rssreader.sh ukindle   # deploy to alternate device
+```
+
+The script excludes config files (`rssreader_configuration.lua`, `rssreader_local_defaults.lua`) to avoid overwriting device-specific credentials. Edit those files on the Kindle directly via SSH.
+
 - **Diffbot** – Uses the Diffbot Analyze API to extract article bodies. Diffbot requires a token tied to a work e-mail domain and the free tier currently grants **10,000 credits per month**. Set the token in the sanitizer configuration entry.
 - **FiveFilters** – Calls the FiveFilters Full-Text RSS endpoint. No account or token is required; you simply enable the sanitizer in the configuration.
 

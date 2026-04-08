@@ -72,4 +72,11 @@ return {
         download_images_when_sanitize_unsuccessful = false, -- if sanitize functionality is unsuccessful, download images (for the original html file)
         show_images_in_preview = true, -- show images in preview screen
     },
+    performance = {
+        stories_per_page = 25,         -- items per API request (cached after first fetch)
+        stories_cache_ttl = 300,       -- story cache lifetime in seconds (default 5 min)
+        structure_cache_ttl = 3600,    -- feed tree cache lifetime in seconds (default 1 hour)
+        fetch_timeout = 10,            -- per-request timeout in seconds
+        sanitizer_timeout = 15,        -- FiveFilters/Diffbot request timeout
+    },
 }
