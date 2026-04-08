@@ -73,10 +73,11 @@ return {
         show_images_in_preview = true, -- show images in preview screen
     },
     performance = {
-        stories_per_page = 25,         -- items per API request (cached after first fetch)
+        stories_per_page = 10,         -- items per initial API request (use Load More for pagination)
         stories_cache_ttl = 300,       -- story cache lifetime in seconds (default 5 min)
         structure_cache_ttl = 3600,    -- feed tree cache lifetime in seconds (default 1 hour)
         fetch_timeout = 10,            -- per-request timeout in seconds
         sanitizer_timeout = 15,        -- FiveFilters/Diffbot request timeout
+        prefetch_count = 10,           -- background-sanitize this many articles when opening a feed
     },
 }

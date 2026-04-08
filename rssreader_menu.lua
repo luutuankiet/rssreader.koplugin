@@ -917,23 +917,29 @@ end
 local function schedulePrefetch(stories, builder, max_prefetch)
     if not Cache then return end
     if not stories or #stories == 0 then return end
-    max_prefetch = max_prefetch or 3
+    local perf = getPerformanceConfig()
+    max_prefetch = max_prefetch or perf.prefetch_count or 10
     local prefetch_delay = 2 -- seconds after menu render
+    local prefetch_gap = 3   -- seconds between each prefetch
 
+    local queued = 0
     for i = 1, math.min(max_prefetch, #stories) do
         local story = stories[i]
         local slink = story and (story.permalink or story.href or story.link)
         if slink and not Cache.get("article:" .. slink, 86400) then
-            UIManager:scheduleIn(prefetch_delay + (i - 1) * 3, function()
-                -- Silent fetch -- no UI messages
+            queued = queued + 1
+            UIManager:scheduleIn(prefetch_delay + (queued - 1) * prefetch_gap, function()
+                -- Silent fetch — no UI messages, non-blocking
                 fetchStoryContent(story, builder, function(content, err, info)
-                    -- Content is now cached by the fetchStoryContent cache logic
                     if content then
-                        logger.dbg("RSSReader prefetch complete:", slink)
+                        logger.dbg("RSSReader prefetch complete:", i, "/", max_prefetch, slink)
                     end
                 end, { silent = true })
             end)
         end
+    end
+    if queued > 0 then
+        logger.info("RSSReader prefetch queued", queued, "articles (of", max_prefetch, "max)")
     end
 end
 
