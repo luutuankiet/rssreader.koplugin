@@ -727,7 +727,7 @@ local function fetchStoryContent(story, builder, on_complete, options)
     -- Check sanitized content cache (instant open for previously-read articles)
     if Cache then
         local cache_key = "article:" .. link
-        local cached = Cache.get(cache_key, 86400) -- 24-hour TTL
+        local cached = Cache.get(cache_key, 0) -- permanent cache (LRU-evicted at 50 entries)
         if cached and cached.html then
             if on_complete then
                 on_complete(cached.html, nil, cached.download_info)
@@ -926,7 +926,7 @@ local function schedulePrefetch(stories, builder, max_prefetch)
     for i = 1, math.min(max_prefetch, #stories) do
         local story = stories[i]
         local slink = story and (story.permalink or story.href or story.link)
-        if slink and not Cache.get("article:" .. slink, 86400) then
+        if slink and not Cache.get("article:" .. slink, 0) then
             queued = queued + 1
             UIManager:scheduleIn(prefetch_delay + (queued - 1) * prefetch_gap, function()
                 -- Silent fetch — no UI messages, non-blocking
