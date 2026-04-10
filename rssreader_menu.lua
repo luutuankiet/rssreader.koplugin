@@ -3064,6 +3064,23 @@ function MenuBuilder:showFreshRSSAccount(account, opts)
         is_special_feed = true,
         feed = { unreadCount = 0 }  
     })  
+    table.insert(children, {  
+        kind = "feed",  
+        id = "freshrss_all_items",  
+        title = _("All Items (Read + Unread)"),
+        api_feed_id = "user/-/state/com.google/reading-list",  
+        is_special_feed = true,
+        include_read = true,
+        skip_prefetch = true,
+        feed = { unreadCount = 0 }  
+    })  
+
+    -- Add "Browse by Category" entry that fetches the full folder/feed tree
+    table.insert(children, {
+        kind = "action",
+        id = "freshrss_browse_categories",
+        title = _("Browse by Category"),
+    })
       
     -- Add configured special feeds  
     if account.special_feeds and type(account.special_feeds) == "table" then  
@@ -3093,11 +3110,60 @@ function MenuBuilder:showFreshRSSAccount(account, opts)
     self:showFreshRSSNode(account, client, tree)  
 end
 
+function MenuBuilder:showFreshRSSCategoryTree(account, client, force_refresh)
+    -- Use cached structure by default (1hr TTL) to avoid blocking UI
+    -- with 2 synchronous HTTP calls (subscription/list + tag/list).
+    -- On Kindle's weak CPU + slow WiFi, force=true freezes the device.
+    local ok, tree = client:fetchStructure(false)
+    if ok and tree and not force_refresh then
+        -- Cache hit — instant, no network needed
+        self:showFreshRSSNode(account, client, tree)
+        return
+    end
+
+    -- Cache miss or force refresh — need network
+    UIManager:show(InfoMessage:new{
+        text = _("Loading categories..."),
+        timeout = 30,
+    })
+    NetworkMgr:runWhenOnline(function()
+        local net_ok, net_tree = client:fetchStructure(true)
+        -- Dismiss the loading message
+        UIManager:close(UIManager:getTopmostVisibleWidget())
+        if not net_ok then
+            UIManager:show(InfoMessage:new{
+                text = net_tree or _("Failed to load category tree."),
+            })
+            return
+        end
+        self:showFreshRSSNode(account, client, net_tree)
+    end)
+end
+
 function MenuBuilder:showFreshRSSNode(account, client, node)
     local children = node and node.children or {}
     local entries = {}
     for _, child in ipairs(children) do
-        if child.kind == "folder" then
+        if child.kind == "action" then
+            local action_callback
+            local hold_callback
+            if child.id == "freshrss_browse_categories" then
+                action_callback = function()
+                    self:showFreshRSSCategoryTree(account, client)
+                end
+                hold_callback = function()
+                    -- Long-press = force refresh from server (bypasses cache)
+                    self:showFreshRSSCategoryTree(account, client, true)
+                end
+            end
+            if action_callback then
+                table.insert(entries, {
+                    text = child.title or _("Action"),
+                    callback = action_callback,
+                    hold_callback = hold_callback,
+                })
+            end
+        elseif child.kind == "folder" then
             local normal_callback = function()
                 self:showFreshRSSNode(account, client, child)
             end
@@ -3169,8 +3235,10 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
     local fetch_options = {}
  
     if is_special_feed then  
-        -- Apply unread filter for all special feeds  
-        fetch_options.read_filter = "unread_only"  
+        -- Apply unread filter for special feeds (unless include_read is set)
+        if not feed_node.include_read then
+            fetch_options.read_filter = "unread_only"
+        end
         fetch_options.n = 15
         
         -- Only apply time filter for the "Today" feed  
@@ -3323,7 +3391,10 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
         UIManager:setDirty(nil, "full")
 
         -- Background pre-fetch first few stories for instant article open
-        schedulePrefetch(stories, self)
+        -- Skip prefetch for read-mode scanning (weak Kindle CPU, user just browsing titles)
+        if not feed_node.skip_prefetch then
+            schedulePrefetch(stories, self)
+        end
     end
 
     if fetch_page then
@@ -3331,6 +3402,10 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
             -- Pass the full fetch_options table
             if not fetch_options.page then
                 fetch_options.page = fetch_page
+            end
+            -- Pass continuation token for page 2+ (GReader API pagination)
+            if fetch_page > 1 and feed_node._rss_continuation then
+                fetch_options.continuation = feed_node._rss_continuation
             end
             -- Make sure to use api_fetch_id and pass fetch_options
             local ok, data_or_err = client:fetchStories(api_fetch_id, fetch_options)
@@ -3345,6 +3420,7 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
             if fetch_page == 1 then
                 feed_node._rss_stories = {}
                 feed_node._rss_story_keys = {}
+                feed_node._rss_continuation = nil
             end
             if #batch == 0 then
                 if fetch_page == 1 and #feed_node._rss_stories == 0 then
@@ -3372,6 +3448,8 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
                     more = #batch > 0
                 end
                 feed_node._rss_has_more = more
+                -- Store continuation token for next page fetch
+                feed_node._rss_continuation = data_or_err.continuation
             end
             finalizeMenu()
         end)

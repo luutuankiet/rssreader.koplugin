@@ -300,7 +300,7 @@ function FreshRSS:buildTreeFromData(subs_data, tags_data)
             local folder_node = {
                 kind = "folder",
                 id = folder_id,
-                title = (tag.label or folder_id:match("user/-/label/(.*)")) or "Folder",
+                title = (tag.label or folder_id:match("user/%-/label/(.*)")) or "Folder",
                 children = {},
             }
             folders[#folders + 1] = folder_node
