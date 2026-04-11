@@ -20,13 +20,19 @@ FreshRSS.__index = FreshRSS
 local USER_AGENT = "KOReader RSSReader"
 
 --- Load performance configuration with safe defaults.
+--- Cached at module level to avoid disk I/O on every call.
+--- The old code did `package.loaded[...] = nil` which forced a disk re-read
+--- on every invocation — expensive on Kindle's slow storage.
+local _perf_config_cache = nil
 local function getPerformanceConfig()
-    package.loaded["rssreader_configuration"] = nil
+    if _perf_config_cache then return _perf_config_cache end
     local ok, config = pcall(require, "rssreader_configuration")
     if ok and type(config) == "table" and type(config.performance) == "table" then
-        return config.performance
+        _perf_config_cache = config.performance
+        return _perf_config_cache
     end
-    return {}
+    _perf_config_cache = {}
+    return _perf_config_cache
 end
 
 --- Build a cache key scoped to this FreshRSS instance's base_url.
@@ -144,7 +150,8 @@ function FreshRSS:authenticate()
     )
 
     local response_chunks = {}
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+    -- Shorter timeouts for Kindle: 10s per block, 30s total (was LARGE_BLOCK/LARGE_TOTAL ~60s/120s)
+    socketutil:set_timeout(10, 30)
     local _, code, headers, status = requestWithScheme({
         url = target_url,
         method = "POST",
@@ -212,7 +219,8 @@ function FreshRSS:authorizedRequest(method, path, query_params, body)
     end
 
     local response_chunks = {}
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+    -- Shorter timeouts for Kindle: 10s per block, 30s total (was LARGE_BLOCK/LARGE_TOTAL ~60s/120s)
+    socketutil:set_timeout(10, 30)
     local _, code, _, status = requestWithScheme({
         url = target_url,
         method = method or "GET",
@@ -257,10 +265,18 @@ function FreshRSS:fetchStructure(force)
     if not force and Cache then
         local perf = getPerformanceConfig()
         local cache_key = makeCacheKey(self, "structure", "tree")
-        local cached = Cache.get(cache_key, perf.structure_cache_ttl or 3600)
+        local cached = Cache.get(cache_key, perf.structure_cache_ttl or 14400)
         if cached then
             self.tree_cache = cached
             return true, cached
+        end
+        -- Stale-while-revalidate: return expired data immediately.
+        -- Third return value signals caller to refresh in background.
+        -- This avoids the 5-15s UI freeze on Kindle when structure cache expires.
+        local stale = Cache.get(cache_key, 0) -- TTL=0 = any age
+        if stale then
+            self.tree_cache = stale
+            return true, stale, true -- is_stale=true
         end
     end
 
@@ -409,13 +425,13 @@ function FreshRSS:fetchStories(feed_id, options)
     if not options.force_refresh and Cache then
         local filter_key = options.read_filter or "all"
         local cache_key = makeCacheKey(self, "stories", feed_id .. ":" .. filter_key .. ":p" .. page)
-        local cached = Cache.get(cache_key, perf.stories_cache_ttl or 300)
+        local cached = Cache.get(cache_key, perf.stories_cache_ttl or 1800)
         if cached then
             return true, cached
         end
     end
 
-    local stories_per_page = perf.stories_per_page or 15
+    local stories_per_page = perf.stories_per_page or 10
     local query = {
         output = "json",
         n = stories_per_page,

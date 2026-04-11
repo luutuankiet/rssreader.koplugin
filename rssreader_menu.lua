@@ -34,13 +34,17 @@ local Cache = nil
 do local ok, mod = pcall(require, "rssreader_cache") if ok then Cache = mod end end
 
 --- Load performance configuration with safe defaults.
+--- Cached at module level to avoid disk I/O on every call.
+local _perf_config_cache = nil
 local function getPerformanceConfig()
-    package.loaded["rssreader_configuration"] = nil
+    if _perf_config_cache then return _perf_config_cache end
     local ok, config = pcall(require, "rssreader_configuration")
     if ok and type(config) == "table" and type(config.performance) == "table" then
-        return config.performance
+        _perf_config_cache = config.performance
+        return _perf_config_cache
     end
-    return {}
+    _perf_config_cache = {}
+    return _perf_config_cache
 end
 
 local function getStartOfTodayTimestamp()
@@ -681,7 +685,8 @@ local function fetchViaHttp(link, on_complete, timeout_seconds)
     if timeout_seconds and timeout_seconds > 0 then
         socketutil:set_timeout(timeout_seconds, timeout_seconds)
     else
-        socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+        -- Shorter default: 10s block, 30s total (was LARGE ~60s/120s)
+        socketutil:set_timeout(10, 30)
     end
     local ok, status_code, _, status_text = http.request{
         url = link,
@@ -918,7 +923,7 @@ local function schedulePrefetch(stories, builder, max_prefetch)
     if not Cache then return end
     if not stories or #stories == 0 then return end
     local perf = getPerformanceConfig()
-    max_prefetch = max_prefetch or perf.prefetch_count or 10
+    max_prefetch = max_prefetch or perf.prefetch_count or 0
     local prefetch_delay = 2 -- seconds after menu render
     local prefetch_gap = 3   -- seconds between each prefetch
 
@@ -3111,17 +3116,28 @@ function MenuBuilder:showFreshRSSAccount(account, opts)
 end
 
 function MenuBuilder:showFreshRSSCategoryTree(account, client, force_refresh)
-    -- Use cached structure by default (1hr TTL) to avoid blocking UI
+    -- Use cached structure by default (4hr TTL) to avoid blocking UI
     -- with 2 synchronous HTTP calls (subscription/list + tag/list).
     -- On Kindle's weak CPU + slow WiFi, force=true freezes the device.
-    local ok, tree = client:fetchStructure(false)
+    local ok, tree, is_stale = client:fetchStructure(false)
     if ok and tree and not force_refresh then
-        -- Cache hit — instant, no network needed
+        -- Cache hit (fresh or stale) — show instantly, no blocking
         self:showFreshRSSNode(account, client, tree)
+        -- If stale, silently refresh in background for next access
+        if is_stale then
+            UIManager:nextTick(function()
+                NetworkMgr:runWhenOnline(function()
+                    local fresh_ok, fresh_tree = client:fetchStructure(true)
+                    if fresh_ok and fresh_tree then
+                        logger.info("RSSReader: category tree refreshed in background")
+                    end
+                end)
+            end)
+        end
         return
     end
 
-    -- Cache miss or force refresh — need network
+    -- No cache at all — must fetch (blocking, with feedback)
     UIManager:show(InfoMessage:new{
         text = _("Loading categories..."),
         timeout = 30,
