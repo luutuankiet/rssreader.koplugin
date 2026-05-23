@@ -358,6 +358,19 @@ function FreshRSS:buildTreeFromData(subs_data, tags_data)
         end
     end
 
+    -- Compute unread counts for folders (sum of child feed counts)
+    for _, folder in ipairs(folders) do
+        if folder.kind == "folder" then
+            local total = 0
+            for _, child in ipairs(folder.children or {}) do
+                if child.feed and type(child.feed.unreadCount) == "number" then
+                    total = total + child.feed.unreadCount
+                end
+            end
+            folder.unreadCount = total
+        end
+    end
+
     return {
         kind = "root",
         title = (self.account and self.account.name) or "FreshRSS",
@@ -431,7 +444,7 @@ function FreshRSS:fetchStories(feed_id, options)
         end
     end
 
-    local stories_per_page = perf.stories_per_page or 10
+    local stories_per_page = options.n or perf.stories_per_page or 10
     local query = {
         output = "json",
         n = stories_per_page,

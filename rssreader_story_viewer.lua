@@ -466,10 +466,11 @@ function StoryViewer:showStory(story, on_action, on_close, options)
         return
     end
 
-    if on_action and story and not story._rss_marked_read then
+    -- v0.3.2: duplicate mark_read fire removed. MenuBuilder caller is now sole owner of mark_read timing.
+    -- StoryViewer is no longer reached from tap path; this preserves single-fire if future code re-enables
+    -- the preview path (caller MUST fire mark_read before invoking StoryViewer:showStory).
+    if story and not story._rss_marked_read then
         story._rss_marked_read = true
-        logger.warn("DEBUG: story viewer calling on_action mark_read for story", story.id or story.title)
-        on_action("mark_read", story)
     end
 
     local html = story.story_content or story.content
@@ -607,7 +608,7 @@ function StoryViewer:showStory(story, on_action, on_close, options)
             UIManager:close(viewer_dialog)
             viewer_dialog = nil
         end
-        UIManager:setDirty(nil, "full")
+        UIManager:setDirty(nil, "partial")
         if asset_cleanup then
             asset_cleanup()
         end

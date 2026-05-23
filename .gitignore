@@ -1,3 +1,8 @@
 rssreader_configuration.lua
 rssreader_local_defaults.lua
 changes.*
+# Agent/editor tooling state — not part of plugin source
+._*
+.agent/
+.gemini/
+GEMINI.md.disabled

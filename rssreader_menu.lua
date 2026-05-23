@@ -250,20 +250,37 @@ local function formatStoryDate(story)
     return nil
 end
 
-local function decoratedStoryTitle(story, decorate)
+local function decoratedStoryTitle(story, decorate, opts)
+    opts = opts or {}
     local title = replaceRightSingleQuoteEntities(story.story_title or story.title or _("Untitled story"))
-    if decorate and isUnread(story) then
+    if decorate and isUnread(story) and not opts.hide_new_marker then
         title = string.format("%s • %s", _("NEW"), title)
     end
 
-    if story.feed_title and story.feed_title ~= "" then  
+    if story.feed_title and story.feed_title ~= "" and not opts.hide_feed_prefix then  
         title = "[" .. story.feed_title .. "]" .. " • " .. title
     end  
 
     local date_label = formatStoryDate(story)
-    if date_label then
-        return string.format("%s %s %s", title, " • ", date_label)
+    if date_label and not opts.hide_date then
+        title = string.format("%s %s %s", title, " • ", date_label)
     end
+
+    if opts.excerpt_length and opts.excerpt_length > 0 then
+        local body = story.story_content or story.content or story.summary or ""
+        if type(body) == "string" and body ~= "" then
+            local plain = body:gsub("<[^>]+>", ""):gsub("&nbsp;", " "):gsub("&amp;", "&"):gsub("&#%d+;", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+            -- v0.3.2: strip "Source: https://..." / "Via: https://..." preamble noise (TechCrunch/Inoreader pattern)
+            plain = plain:gsub("^Source:%s*https?://%S+%s*", ""):gsub("^Via:%s*https?://%S+%s*", ""):gsub("^Source:%s+", "")
+            if #plain > opts.excerpt_length then
+                plain = plain:sub(1, opts.excerpt_length) .. "…"
+            end
+            if plain ~= "" then
+                title = title .. "\n▸ " .. plain
+            end
+        end
+    end
+
     return title
 end
 
@@ -969,7 +986,8 @@ local function downloadStoryToCache(story, builder, on_complete)
             return
         end
 
-        FileManager:openFile(target_path)
+        -- v0.3.2: downloadStoryToCache no longer auto-opens; caller decides what to do with path
+        -- (read path → handleStoryAction "go_to_link" invokes ReaderUI:showReader; save path leaves file on disk)
         if on_complete then
             on_complete(target_path)
         end
@@ -1031,85 +1049,30 @@ local function buildUniqueTargetPathWithExtension(directory, base_name, extensio
 end
 
 function MenuBuilder:showStory(stories, index, on_action, on_close, options, context)
-    self.story_viewer = self.story_viewer or StoryViewer:new()
+    -- v0.3.2: ditch preview screen. Tap article = direct entry to native KOReader reader.
+    -- Delegates to canonical bypass path (handleStoryAction "go_to_link") which closes the
+    -- active menu, downloads to cache, broadcasts SetupShowReader, calls ReaderUI:showReader.
+    -- StoryViewer is preserved on disk but no longer reachable from tap path.
     local reader = self.reader
     if reader and type(reader.requestFeedStatePreservation) == "function" then
         reader:requestFeedStatePreservation()
     end
-    local current_menu = self.reader and self.reader.current_menu_info and self.reader.current_menu_info.menu
-    local current_info = self.reader and self.reader.current_menu_info
-    local history_snapshot
-    if self.reader and self.reader.history then
-        history_snapshot = {}
-        for i, entry in ipairs(self.reader.history) do
-            history_snapshot[i] = entry
-        end
-    end
     local story = stories and stories[index]
-    if story then
-        normalizeStoryReadState(story)
-        if isUnread(story) then
-            self:handleStoryAction(stories, index, "mark_read", story, context)
-        end
+    if not story then
+        if on_close then on_close() end
+        return
     end
-    local is_api_context = false
-    if context and (context.feed_type == "newsblur" or context.feed_type == "commafeed") then
-        is_api_context = true
+    normalizeStoryReadState(story)
+    if isUnread(story) then
+        self:handleStoryAction(stories, index, "mark_read", story, context)
     end
-
-    local disable_mutators = false
-    if options and options.disable_story_mutators and not is_api_context then
-        disable_mutators = true
+    -- v0.3.2: no menu-lifecycle hook to fire context.refresh on back from native reader
+    -- (user lands in FileManager last-dir, not plugin list). When user re-enters plugin →
+    -- FreshRSS → Today (Unread), menu rebuilds from scratch with fresh data anyway.
+    self:handleStoryAction(stories, index, "go_to_link", { story = story }, context)
+    if on_close then
+        on_close()
     end
-    local allow_mark_unread = true
-    if context then
-        if context.feed_type == "local" then
-            allow_mark_unread = true
-        else
-            local client = context.client
-            if client and type(client.markStoryAsUnread) == "function" then
-                allow_mark_unread = true
-            else
-                allow_mark_unread = false
-            end
-        end
-    end
-    local show_images_in_preview = false
-    if self.accounts and self.accounts.config then
-        local flag = util.tableGetValue(self.accounts.config, "features", "show_images_in_preview")
-        show_images_in_preview = flag == true
-    end
-
-    self.story_viewer:showStory(story, function(action, payload)
-        self:handleStoryAction(stories, index, action, payload, context)
-    end, function()
-        if self.reader and current_menu then
-            if current_info and self.reader.current_menu_info ~= current_info then
-                self.reader.current_menu_info = current_info
-            end
-            if history_snapshot and #history_snapshot > 0 and (not self.reader.history or #self.reader.history == 0) and not current_menu._rss_is_root_menu then
-                self.reader.history = history_snapshot
-            end
-            self.reader:updateBackButton(current_menu)
-        else
-        end
-        if context and type(context.refresh) == "function" then
-            local should_refresh = context._needs_refresh or context.force_refresh_on_close
-            if should_refresh then
-                context._needs_refresh = nil
-                context.force_refresh_on_close = nil
-                context.refresh()
-            end
-        end
-        if on_close then
-            on_close()
-        end
-    end, {
-        disable_story_mutators = disable_mutators,
-        is_api_version = is_api_context,
-        allow_mark_unread = allow_mark_unread,
-        show_images_in_preview = show_images_in_preview,
-    })
 end
 
 function MenuBuilder:_updateStoryEntry(context, stories, index)
@@ -1195,13 +1158,28 @@ function MenuBuilder:handleStoryAction(stories, index, action, payload, context)
         closeCurrentStory()
         closeActiveMenu()
 
+        -- v0.3.2: show loading msg → on success broadcast SetupShowReader + ReaderUI:showReader.
+        local loading_msg = InfoMessage:new{ text = _("Loading article…"), timeout = nil }
+        UIManager:show(loading_msg)
         downloadStoryToCache(target_story, self, function(path, err)
-            if err then
+            UIManager:close(loading_msg)
+            if err or not path then
                 local link = target_story and (target_story.permalink or target_story.href or target_story.link)
-                if link then
-                    UIManager:show(InfoMessage:new{ text = string.format(_("Opening: %s"), link) })
+                local err_text
+                if err and link then
+                    err_text = string.format(_("Failed to open article (%s): %s"), tostring(err), link)
+                elseif err then
+                    err_text = string.format(_("Failed to open article: %s"), tostring(err))
+                else
+                    err_text = _("Failed to open article.")
                 end
+                UIManager:show(InfoMessage:new{ text = err_text, timeout = 4 })
+                return
             end
+            local Event = require("ui/event")
+            local ReaderUI = require("apps/reader/readerui")
+            UIManager:broadcastEvent(Event:new("SetupShowReader"))
+            ReaderUI:showReader(path)
         end)
         return
     end
@@ -1488,17 +1466,9 @@ function MenuBuilder:createStoryLongPressMenu(stories, index, context, open_call
         end
     end
 
+    -- v0.3.2: "Preview" button removed — Preview === Open after ditch-preview rewrite.
+    -- Long-press menu = Open / Save / Mark X / Close. Tap = Open (via showStory→go_to_link).
     local buttons = {{
-        {
-            text = _("Preview"),
-            callback = function()
-                closeDialog()
-                markStoryReadIfNeeded()
-                if type(open_callback) == "function" then
-                    open_callback()
-                end
-            end,
-        },
         {
             text = _("Open"),
             callback = function()
@@ -2134,7 +2104,7 @@ function MenuBuilder:showLocalFeed(feed, opts)
             menu_instance = Menu:new{
                 title = feed_node.title or _("Feed"),
                 item_table = entries,
-                multilines_forced = true,
+                multilines_forced = false,
             }
             menu_instance._rss_feed_node = feed_node
             menu_instance.onMenuHold = triggerHoldCallback
@@ -2158,7 +2128,7 @@ function MenuBuilder:showLocalFeed(feed, opts)
 
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
-        UIManager:setDirty(nil, "full")
+        UIManager:setDirty(nil, "partial")
 
         -- Background pre-fetch first few stories for instant article open
         schedulePrefetch(stories, self)
@@ -2626,7 +2596,7 @@ function MenuBuilder:showNewsBlurFeed(account, client, feed_node, opts)
             menu_instance = Menu:new{
                 title = feed_node.title or (account and account.name) or _("NewsBlur"),
                 item_table = entries,
-                multilines_forced = true,
+                multilines_forced = false,
             }
             menu_instance._rss_feed_node = feed_node
             menu_instance.onMenuHold = triggerHoldCallback
@@ -2681,7 +2651,7 @@ function MenuBuilder:showNewsBlurFeed(account, client, feed_node, opts)
 
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
-        UIManager:setDirty(nil, "full")
+        UIManager:setDirty(nil, "partial")
 
         -- Background pre-fetch first few stories for instant article open
         schedulePrefetch(stories, self)
@@ -2925,7 +2895,7 @@ function MenuBuilder:showCommaFeedFeed(account, client, feed_node, opts)
             menu_instance = Menu:new{
                 title = feed_node.title or (account and account.name) or _("CommaFeed"),
                 item_table = entries,
-                multilines_forced = true,
+                multilines_forced = false,
             }
             menu_instance._rss_feed_node = feed_node
             menu_instance.onMenuHold = triggerHoldCallback
@@ -2979,7 +2949,7 @@ function MenuBuilder:showCommaFeedFeed(account, client, feed_node, opts)
 
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
-        UIManager:setDirty(nil, "full")
+        UIManager:setDirty(nil, "partial")
 
         -- Background pre-fetch first few stories for instant article open
         schedulePrefetch(stories, self)
@@ -3180,13 +3150,35 @@ function MenuBuilder:showFreshRSSNode(account, client, node)
                 })
             end
         elseif child.kind == "folder" then
-            local normal_callback = function()
-                self:showFreshRSSNode(account, client, child)
+            local folder_count = child.unreadCount or 0
+            -- Skip empty folders (0 unread articles)
+            if folder_count > 0 then
+                local folder_title = child.title or _("Untitled folder")
+                folder_title = folder_title .. " (" .. tostring(folder_count) .. ")"
+                -- Tap = open as article stream (like FreshRSS web UI)
+                -- Hold = expand to see individual sub-feeds
+                local stream_callback = function()
+                    local folder_as_feed = {
+                        kind = "feed",
+                        id = child.id,
+                        title = child.title,
+                        api_feed_id = child.id,
+                        is_special_feed = true,
+                        feed = { unreadCount = folder_count },
+                    }
+                    self:showFreshRSSFeed(account, client, folder_as_feed)
+                end
+                local expand_callback = function()
+                    self:showFreshRSSNode(account, client, child)
+                end
+                table.insert(entries, {
+                    text = folder_title,
+                    bold = true,
+                    callback = stream_callback,
+                    hold_callback = expand_callback,
+                    hold_keep_menu_open = false,
+                })
             end
-            table.insert(entries, {
-                text = child.title or _("Untitled folder"),
-                callback = normal_callback,
-            })
         elseif child.kind == "feed" then
             local normal_callback = function()
                 self:showFreshRSSFeed(account, client, child)
@@ -3316,6 +3308,7 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
             force_refresh_on_close = false,
         }
 
+        local perf = getPerformanceConfig()
         local entries = {}
         for index, story in ipairs(stories) do
             normalizeStoryLink(story)
@@ -3325,7 +3318,11 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
                 end, nil, nil, context)
             end
             table.insert(entries, {
-                text = decoratedStoryTitle(story, true),
+                text = decoratedStoryTitle(story, true, {
+                    hide_new_marker = feed_node.is_special_feed and not feed_node.include_read,
+                    hide_date = feed_node.id == "freshrss_today_unread",
+                    excerpt_length = perf and perf.excerpt_length or nil,
+                }),
                 bold = isUnread(story),
                 callback = openStory,
                 hold_callback = function()
@@ -3350,7 +3347,7 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
             menu_instance = Menu:new{
                 title = feed_node.title or (account and account.name) or _("FreshRSS"),
                 item_table = entries,
-                multilines_forced = true,
+                multilines_forced = perf and perf.excerpt_length and perf.excerpt_length > 0 or false,
             }
             menu_instance._rss_feed_node = feed_node
             menu_instance.onMenuHold = triggerHoldCallback
@@ -3404,7 +3401,7 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
 
         restoreMenuPage(menu_instance, feed_node, opts.menu_page or feed_node._rss_menu_page)
 
-        UIManager:setDirty(nil, "full")
+        UIManager:setDirty(nil, "partial")
 
         -- Background pre-fetch first few stories for instant article open
         -- Skip prefetch for read-mode scanning (weak Kindle CPU, user just browsing titles)
