@@ -6,3 +6,7 @@ changes.*
 .agent/
 .gemini/
 GEMINI.md.disabled
+
+# gsd-lite skill skeleton + applied .patch artifacts (already in git history)
+.gsd/
+*.patch
