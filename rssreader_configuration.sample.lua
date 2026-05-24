@@ -79,5 +79,11 @@ return {
         fetch_timeout = 10,            -- per-request timeout in seconds
         sanitizer_timeout = 15,        -- FiveFilters/Diffbot request timeout
         prefetch_count = 10,           -- background-sanitize this many articles when opening a feed
+        -- v0.4.x scan view (FreshRSS only). Omit any key to take its default.
+        excerpt_length = 350,          -- chars of dim excerpt under each title (0 disables; default 350)
+        items_per_page = 5,            -- rich rows per page in the scan view (default 5)
+        show_excerpt_divider = true,   -- thin hairline between title and excerpt (default true)
+        title_face = "infofont",       -- KOReader font face for the title (bold if unread)
+        excerpt_face = "smallinfofont",-- KOReader font face for the dim italic excerpt
     },
 }

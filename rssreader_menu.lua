@@ -382,14 +382,21 @@ local function buildStoryEntry(story, feed_node, perf)
         feed_label = story.feed_title
     end
 
+    -- excerpt_length: nil (key missing) => use 350 default; explicit 0 => disabled
+    local excerpt_max
+    if perf and perf.excerpt_length ~= nil then
+        excerpt_max = perf.excerpt_length
+    else
+        excerpt_max = 350
+    end
     local excerpt = ""
-    if perf and perf.excerpt_length and perf.excerpt_length > 0 then
+    if excerpt_max > 0 then
         local body = story.story_content or story.content or story.summary or ""
         if type(body) == "string" and body ~= "" then
             local plain = body:gsub("<[^>]+>", ""):gsub("&nbsp;", " "):gsub("&amp;", "&"):gsub("&#%d+;", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
             plain = plain:gsub("^Source:%s*https?://%S+%s*", ""):gsub("^Via:%s*https?://%S+%s*", ""):gsub("^Source:%s+", "")
-            if #plain > perf.excerpt_length then
-                plain = plain:sub(1, perf.excerpt_length) .. "\xe2\x80\xa6"
+            if #plain > excerpt_max then
+                plain = plain:sub(1, excerpt_max) .. "\xe2\x80\xa6"
             end
             excerpt = plain
         end
