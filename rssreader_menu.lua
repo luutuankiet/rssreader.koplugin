@@ -1,5 +1,6 @@
 local util = require("util")
 local Menu = require("ui/widget/menu")
+local StoryMenuItem = require("rssreader_story_menu_item")
 local Button = require("ui/widget/button")
 local ButtonDialog = require("ui/widget/buttondialog")
 local ffiUtil = require("ffi/util")
@@ -45,6 +46,80 @@ local function getPerformanceConfig()
     end
     _perf_config_cache = {}
     return _perf_config_cache
+end
+
+-- StoryMenu: Menu subclass that renders rich rows via StoryMenuItem
+-- (distinct title + divider + excerpt regions per row, vs default MenuItem's
+-- single text blob). Used by showFreshRSSFeed.
+local StoryMenu = Menu:extend{}
+
+-- IMPORTANT: base Menu uses :updateItems (NOT :_updateItemsBuildUI -- that name is
+-- ListMenu's invention, wired via covermenu.lua's hook trickery). For a clean Menu
+-- subclass, override :updateItems directly and replicate the body.
+function StoryMenu:updateItems(select_number, no_recalculate_dimen)
+    local LineWidget = require("ui/widget/linewidget")
+    local Blitbuffer = require("ffi/blitbuffer")
+    local Size = require("ui/size")
+    local Geom = require("ui/geometry")
+    local UIManager = require("ui/uimanager")
+
+    local old_dimen = self.dimen and self.dimen:copy()
+    self.layout = {}
+    self.item_group:clear()
+    self.page_info:resetLayout()
+    self.return_button:resetLayout()
+    self.content_group:resetLayout()
+    self:_recalculateDimen(no_recalculate_dimen)
+
+    local separator_w = (self.inner_dimen and self.inner_dimen.w) or self.width or self.screen_w
+    local function make_line()
+        return LineWidget:new{
+            dimen = Geom:new{ w = separator_w, h = Size.line.thin },
+            background = Blitbuffer.COLOR_DARK_GRAY,
+        }
+    end
+    -- top separator
+    table.insert(self.item_group, make_line())
+
+    local idx_offset = (self.page - 1) * self.perpage
+    for idx = 1, self.perpage do
+        local index = idx_offset + idx
+        local entry = self.item_table[index]
+        if entry == nil then break end
+        entry.idx = index
+        if index == self.itemnumber then
+            select_number = idx
+        end
+        local item_tmp = StoryMenuItem:new{
+            entry = entry,
+            feed_label = entry.story_feed_label or "",
+            title_text = entry.story_title_text or entry.text or "",
+            excerpt_text = entry.story_excerpt_text or "",
+            mandatory = entry.story_mandatory or "",
+            is_unread = entry.is_unread or entry.bold == true,
+            show_parent = self.show_parent,
+            menu = self,
+            width = self.item_dimen.w,
+            height = self.item_dimen.h,
+            dimen = self.item_dimen:copy(),
+            title_face_name = self._story_title_face or "infofont",
+            excerpt_face_name = self._story_excerpt_face or "smallinfofont",
+            show_divider = self._story_show_divider ~= false,
+        }
+        table.insert(self.item_group, item_tmp)
+        table.insert(self.item_group, make_line())
+        table.insert(self.layout, {item_tmp})
+    end
+
+    self:updatePageInfo(select_number)
+    self:mergeTitleBarIntoLayout()
+
+    UIManager:setDirty(self.show_parent, function()
+        local refresh_dimen =
+            old_dimen and old_dimen:combine(self.dimen)
+            or self.dimen
+        return "ui", refresh_dimen
+    end)
 end
 
 local function getStartOfTodayTimestamp()
@@ -282,6 +357,47 @@ local function decoratedStoryTitle(story, decorate, opts)
     end
 
     return title
+end
+
+-- buildStoryEntry: returns split fields for StoryMenuItem (title / excerpt / mandatory / is_unread)
+-- vs decoratedStoryTitle which returns a concatenated string.
+-- Used by showFreshRSSFeed; other feeds keep decoratedStoryTitle for backward compat.
+local function buildStoryEntry(story, feed_node, perf)
+    local hide_new_marker = feed_node.is_special_feed and not feed_node.include_read
+    local in_aggregate = feed_node.id == "freshrss_today_unread"
+        or feed_node.id == "freshrss_all_items"
+        or (feed_node.kind == "folder")
+
+    local clean_title = replaceRightSingleQuoteEntities(story.story_title or story.title or _("Untitled story"))
+    local unread = isUnread(story)
+
+    if unread and not hide_new_marker then
+        clean_title = string.format("%s \xe2\x80\xa2 %s", _("NEW"), clean_title)
+    end
+
+    -- feed_label: small dim source tag rendered as its own widget (TextWidget auto-truncates
+    -- with ellipsis via max_width). Only shown in aggregate views where source is non-obvious.
+    local feed_label = ""
+    if in_aggregate and story.feed_title and story.feed_title ~= "" then
+        feed_label = story.feed_title
+    end
+
+    local excerpt = ""
+    if perf and perf.excerpt_length and perf.excerpt_length > 0 then
+        local body = story.story_content or story.content or story.summary or ""
+        if type(body) == "string" and body ~= "" then
+            local plain = body:gsub("<[^>]+>", ""):gsub("&nbsp;", " "):gsub("&amp;", "&"):gsub("&#%d+;", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+            plain = plain:gsub("^Source:%s*https?://%S+%s*", ""):gsub("^Via:%s*https?://%S+%s*", ""):gsub("^Source:%s+", "")
+            if #plain > perf.excerpt_length then
+                plain = plain:sub(1, perf.excerpt_length) .. "\xe2\x80\xa6"
+            end
+            excerpt = plain
+        end
+    end
+
+    local mandatory = formatStoryDate(story) or ""
+
+    return clean_title, excerpt, mandatory, unread, feed_label
 end
 
 local function resolveStoryFeedId(context, story)
@@ -3317,13 +3433,15 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
                     self:handleStoryAction(stories, index, action, payload, context)
                 end, nil, nil, context)
             end
+            local title, excerpt, mandatory, unread, feed_label = buildStoryEntry(story, feed_node, perf)
             table.insert(entries, {
-                text = decoratedStoryTitle(story, true, {
-                    hide_new_marker = feed_node.is_special_feed and not feed_node.include_read,
-                    hide_date = feed_node.id == "freshrss_today_unread",
-                    excerpt_length = perf and perf.excerpt_length or nil,
-                }),
-                bold = isUnread(story),
+                text = title,
+                story_title_text = title,
+                story_excerpt_text = excerpt,
+                story_mandatory = mandatory,
+                story_feed_label = feed_label,
+                is_unread = unread,
+                bold = unread,
                 callback = openStory,
                 hold_callback = function()
                     self:createStoryLongPressMenu(stories, index, context, openStory)
@@ -3344,10 +3462,13 @@ function MenuBuilder:showFreshRSSFeed(account, client, feed_node, opts)
             end
             menu_instance.onMenuHold = triggerHoldCallback
         else
-            menu_instance = Menu:new{
+            menu_instance = StoryMenu:new{
                 title = feed_node.title or (account and account.name) or _("FreshRSS"),
                 item_table = entries,
-                multilines_forced = perf and perf.excerpt_length and perf.excerpt_length > 0 or false,
+                items_per_page = perf and perf.items_per_page or 5,
+                _story_title_face = perf and perf.title_face or "infofont",
+                _story_excerpt_face = perf and perf.excerpt_face or "smallinfofont",
+                _story_show_divider = perf == nil or perf.show_excerpt_divider ~= false,
             }
             menu_instance._rss_feed_node = feed_node
             menu_instance.onMenuHold = triggerHoldCallback
